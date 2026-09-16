@@ -45,6 +45,7 @@ import json
 import os
 import threading
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -72,26 +73,29 @@ class ETagCache:
     Simple in-memory cache for ETag-based conditional requests.
 
     Stores response data keyed by an opaque resource/context digest, with ETag
-    for validation.
+    for validation. Reads and refreshes retain frequently used entries; new
+    entries evict the least recently used response when capacity is reached.
     """
 
     def __init__(self, max_size: int = 1000):
-        self._cache: dict[str, dict[str, Any]] = {}
+        if isinstance(max_size, bool) or not isinstance(max_size, int) or max_size <= 0:
+            raise ValueError("max_size must be a positive integer")
+        self._cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._max_size = max_size
 
     def get(self, url: str) -> dict[str, Any] | None:
         """Get cached entry for URL."""
-        return self._cache.get(url)
+        entry = self._cache.get(url)
+        if entry is not None:
+            self._cache.move_to_end(url)
+        return entry
 
     def set(self, url: str, etag: str, data: Any) -> None:
         """Store response with ETag."""
-        # Simple LRU-ish: remove oldest if at capacity
-        if len(self._cache) >= self._max_size:
-            # Remove first item (oldest)
-            first_key = next(iter(self._cache))
-            del self._cache[first_key]
-
         self._cache[url] = {"etag": etag, "data": data}
+        self._cache.move_to_end(url)
+        if len(self._cache) > self._max_size:
+            self._cache.popitem(last=False)
 
     def clear(self) -> None:
         """Clear all cached entries."""
