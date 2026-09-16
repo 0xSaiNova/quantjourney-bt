@@ -141,3 +141,18 @@ def test_flat_market_round_trip_loses_spread_and_fees_on_both_legs():
     assert result.nav.iloc[-1] == pytest.approx(9_970)
     assert result.cash.iloc[-1] == pytest.approx(9_970)
     assert result.positions.iloc[-1]["SPY"] == 0
+
+
+@pytest.mark.parametrize("field", ["max_gross_leverage", "max_margin_utilization", "tolerance"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), -0.01])
+def test_invalid_risk_settings_fail_before_simulation(field, value):
+    with pytest.raises(ValueError, match=field):
+        PreTradeRisk(**{field: value})
+
+
+def test_zero_risk_limits_reject_opening_positions():
+    risk = PreTradeRisk(max_gross_leverage=0, max_margin_utilization=0, tolerance=0)
+    entry = Order("SPY", OrderSide.BUY, 1)
+    result, _ = run_scenario([100, 100], {0: [entry]}, risk=risk)
+    assert entry.status == OrderStatus.REJECTED
+    assert result.nav.tolist() == [10_000, 10_000]

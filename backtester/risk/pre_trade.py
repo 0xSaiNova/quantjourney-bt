@@ -58,10 +58,16 @@ class PreTradeRisk:
         reserve_pending_orders: bool = False,
         tolerance: float = 1e-9,
     ) -> None:
-        if max_margin_utilization is not None and max_margin_utilization < 0:
-            raise ValueError("max_margin_utilization must be non-negative")
-        if max_gross_leverage is not None and max_gross_leverage < 0:
-            raise ValueError("max_gross_leverage must be non-negative")
+        if max_margin_utilization is not None and (
+            not np.isfinite(max_margin_utilization) or max_margin_utilization < 0
+        ):
+            raise ValueError("max_margin_utilization must be finite and non-negative")
+        if max_gross_leverage is not None and (
+            not np.isfinite(max_gross_leverage) or max_gross_leverage < 0
+        ):
+            raise ValueError("max_gross_leverage must be finite and non-negative")
+        if not np.isfinite(tolerance) or tolerance < 0:
+            raise ValueError("tolerance must be finite and non-negative")
         self.max_margin_utilization = max_margin_utilization
         self.max_gross_leverage = max_gross_leverage
         self.allow_short = bool(allow_short)
