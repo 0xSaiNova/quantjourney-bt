@@ -20,12 +20,23 @@ turnover and cost drag against the faster templates.
 
 Usage:
     ./strategy.sh example_weights_09_intraday_1h_sma_trend
+
+The default remains the published SMA(10/30) rule. Optional QJ_SMA_FAST,
+QJ_SMA_SLOW, QJ_SMA_ENTRY_BPS and QJ_SMA_CONFIRM_BARS environment variables
+configure research variants. Entry confirmation and a positive spread buffer
+can reduce whipsaw; neither delays exits after a bearish crossover. Positions
+may be held overnight: "intraday" describes bar frequency, not forced daily
+liquidation. No variant is assumed to improve out-of-sample returns.
+
+For local CSV research without cloud credentials:
+    python tools/research_hourly_sma.py --input data/w09_hourly_ohlcv.csv
 """
 
 import asyncio
 import os
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from backtester import Backtester
@@ -41,20 +52,57 @@ def _credentials() -> dict:
     }
 
 
-def _recent_period(days: int = 60) -> dict[str, str]:
-    end = datetime.now(UTC).date()
-    start = end - timedelta(days=days)
-    return {"start": start.isoformat(), "end": end.isoformat()}
+@dataclass(frozen=True)
+class HourlyTrendParameters:
+    """Windows count observed hourly bars, including overnight holding periods."""
+
+    fast_window: int = 10
+    slow_window: int = 30
+    entry_buffer_bps: float = 0.0
+    confirmation_bars: int = 1
+
+    def __post_init__(self) -> None:
+        for name in ("fast_window", "slow_window", "confirmation_bars"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.fast_window >= self.slow_window:
+            raise ValueError("fast_window must be smaller than slow_window")
+        if not np.isfinite(self.entry_buffer_bps) or self.entry_buffer_bps < 0:
+            raise ValueError("entry_buffer_bps must be finite and non-negative")
+
+
+def hourly_trend_signals(close: pd.DataFrame, parameters: HourlyTrendParameters) -> pd.DataFrame:
+    """Confirm entries above a spread buffer; exit immediately on a down-cross.
+
+    Only completed bars enter rolling windows. The execution engine, rather
+    than this signal function, applies the next-bar execution delay. Invalid
+    prices reset the position intent and require a complete warm-up again.
+    """
+    prices = close.where(np.isfinite(close) & (close > 0))
+    fast = prices.rolling(parameters.fast_window).mean()
+    slow = prices.rolling(parameters.slow_window).mean()
+    valid = fast.notna() & slow.notna()
+    spread = fast.div(slow) - 1.0
+    enter = spread.gt(parameters.entry_buffer_bps / 10_000)
+    enter = enter.rolling(parameters.confirmation_bars).sum().eq(parameters.confirmation_bars)
+    events = pd.DataFrame(np.nan, index=close.index, columns=close.columns)
+    events = events.mask(enter & valid, 1.0)
+    events = events.mask(spread.le(0) | ~valid, 0.0)
+    return events.ffill().fillna(0.0)
 
 
 class IntradaySMATrend1h(Backtester):
     """Hourly SMA(10/30) trend/cash strategy."""
 
+    def __init__(self, *, trend_parameters: HourlyTrendParameters | None = None, **kwargs):
+        self.trend_parameters = trend_parameters or HourlyTrendParameters()
+        super().__init__(**kwargs)
+
     def _compute_signals(self) -> pd.DataFrame:
-        fast = self.instruments_data.get_feature("SMA_10_close")
-        slow = self.instruments_data.get_feature("SMA_30_close")
-        valid = fast.notna() & slow.notna()
-        return (fast > slow).astype(float).where(valid, 0.0)
+        return hourly_trend_signals(
+            self.instruments_data.get_feature("close"), self.trend_parameters
+        )
 
     def _compute_weights(self) -> pd.DataFrame:
         active = self.signals == 1.0
@@ -63,8 +111,15 @@ class IntradaySMATrend1h(Backtester):
 
 
 async def main() -> None:
+    parameters = HourlyTrendParameters(
+        fast_window=int(os.environ.get("QJ_SMA_FAST", "10")),
+        slow_window=int(os.environ.get("QJ_SMA_SLOW", "30")),
+        entry_buffer_bps=float(os.environ.get("QJ_SMA_ENTRY_BPS", "0")),
+        confirmation_bars=int(os.environ.get("QJ_SMA_CONFIRM_BARS", "1")),
+    )
     strategy = IntradaySMATrend1h(
         **_credentials(),
+        trend_parameters=parameters,
         strategy_name="ExampleWeights09_IntradaySMATrend1h",
         strategy_type="Long / Cash",
         initial_capital=100_000,
@@ -78,7 +133,11 @@ async def main() -> None:
         max_position_size=0.25,
         rebalance_policy=RebalancePolicy(frequency=None, rebalance_on_signal_change=True),
         indicators_config=[
-            {"function": "SMA", "price_cols": ["close"], "params": {"periods": [10, 30]}},
+            {
+                "function": "SMA",
+                "price_cols": ["close"],
+                "params": {"periods": [parameters.fast_window, parameters.slow_window]},
+            },
         ],
         show_text_reports=True,
         save_text_reports=True,
