@@ -175,3 +175,4 @@ sdist strategies/README.md
 sdist strategy.bat
 sdist strategy.py
 sdist strategy.sh
+sdist docs/strategy-results/w09-hourly-research.md
