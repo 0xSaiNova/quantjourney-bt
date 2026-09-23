@@ -27,9 +27,12 @@ configure research variants. Entry confirmation and a positive spread buffer
 can reduce whipsaw; neither delays exits after a bearish crossover. Positions
 may be held overnight: "intraday" describes bar frequency, not forced daily
 liquidation. No variant is assumed to improve out-of-sample returns.
+QJ_SMA_SLOPE_BARS optionally requires the slow SMA to exceed its value that
+many completed bars ago before entering (0 disables). This is an entry-only
+filter; a falling slope alone does not close an existing position.
 
 For local CSV research without cloud credentials:
-    python tools/research_hourly_sma.py --input data/w09_hourly_ohlcv.csv
+    python tools/research_hourly_sma.py --input data/w09_hourly_ohlcv_20260923.csv
 """
 
 import asyncio
@@ -60,6 +63,7 @@ class HourlyTrendParameters:
     slow_window: int = 30
     entry_buffer_bps: float = 0.0
     confirmation_bars: int = 1
+    slope_lookback_bars: int = 0
 
     def __post_init__(self) -> None:
         for name in ("fast_window", "slow_window", "confirmation_bars"):
@@ -68,6 +72,12 @@ class HourlyTrendParameters:
                 raise ValueError(f"{name} must be a positive integer")
         if self.fast_window >= self.slow_window:
             raise ValueError("fast_window must be smaller than slow_window")
+        if (
+            isinstance(self.slope_lookback_bars, bool)
+            or not isinstance(self.slope_lookback_bars, int)
+            or self.slope_lookback_bars < 0
+        ):
+            raise ValueError("slope_lookback_bars must be a non-negative integer")
         if not np.isfinite(self.entry_buffer_bps) or self.entry_buffer_bps < 0:
             raise ValueError("entry_buffer_bps must be finite and non-negative")
 
@@ -85,6 +95,8 @@ def hourly_trend_signals(close: pd.DataFrame, parameters: HourlyTrendParameters)
     valid = fast.notna() & slow.notna()
     spread = fast.div(slow) - 1.0
     enter = spread.gt(parameters.entry_buffer_bps / 10_000)
+    if parameters.slope_lookback_bars:
+        enter &= slow.gt(slow.shift(parameters.slope_lookback_bars))
     enter = enter.rolling(parameters.confirmation_bars).sum().eq(parameters.confirmation_bars)
     events = pd.DataFrame(np.nan, index=close.index, columns=close.columns)
     events = events.mask(enter & valid, 1.0)
@@ -116,6 +128,7 @@ async def main() -> None:
         slow_window=int(os.environ.get("QJ_SMA_SLOW", "30")),
         entry_buffer_bps=float(os.environ.get("QJ_SMA_ENTRY_BPS", "0")),
         confirmation_bars=int(os.environ.get("QJ_SMA_CONFIRM_BARS", "1")),
+        slope_lookback_bars=int(os.environ.get("QJ_SMA_SLOPE_BARS", "0")),
     )
     strategy = IntradaySMATrend1h(
         **_credentials(),

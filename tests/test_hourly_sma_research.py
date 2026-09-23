@@ -32,6 +32,26 @@ def test_default_signals_preserve_the_published_rule():
     pd.testing.assert_frame_equal(hourly_trend_signals(close, HourlyTrendParameters()), expected)
 
 
+def test_slope_filter_blocks_falling_sma_entries_without_forcing_early_exits():
+    close = pd.DataFrame({"SPY": [110, 100, 90, 96, 97, 98, 105, 104, 104.8, 104.6, 90]})
+    params = HourlyTrendParameters(1, 3, slope_lookback_bars=1)
+    actual = hourly_trend_signals(close, params)["SPY"]
+    # At bars 3/4 price exceeds the slow SMA, but that SMA is falling.
+    # At bar 9 the slope is falling again: preserve the existing position.
+    # The bearish crossover at bar 10 still exits immediately.
+    assert actual.tolist() == [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0]
+
+
+def test_slope_filter_requires_history_and_never_enters_on_a_flat_sma():
+    close = pd.DataFrame({"SPY": [100.0] * 20})
+    params = HourlyTrendParameters(1, 3, slope_lookback_bars=5)
+    assert hourly_trend_signals(close, params).eq(0).all().all()
+    close["SPY"] = np.arange(100.0, 120.0)
+    signals = hourly_trend_signals(close, params)["SPY"]
+    assert signals.iloc[:7].eq(0).all()
+    assert signals.iloc[7:].eq(1).all()
+
+
 def test_buffer_holds_existing_trend_and_confirmation_never_delays_exit():
     close = pd.DataFrame({"SPY": [100, 100, 102, 104, 104.1, 103, 105, 107]})
     params = HourlyTrendParameters(1, 2, entry_buffer_bps=10, confirmation_bars=2)
@@ -47,7 +67,7 @@ def test_missing_or_invalid_price_resets_intent_and_requires_full_warmup(invalid
 
 def test_future_bars_cannot_change_existing_signals_or_weights():
     close = market_frame()
-    params = HourlyTrendParameters(5, 30, 10, 2)
+    params = HourlyTrendParameters(5, 30, 10, 2, slope_lookback_bars=3)
     changed = close.copy()
     changed.iloc[90:] *= 3
     pd.testing.assert_frame_equal(
@@ -67,7 +87,7 @@ def test_production_strategy_uses_the_same_research_signals():
     from backtester.portfolio.instr_data import InstrumentData
 
     close = market_frame()
-    params = HourlyTrendParameters(5, 30, 10, 2)
+    params = HourlyTrendParameters(5, 30, 10, 2, slope_lookback_bars=3)
     strategy = IntradaySMATrend1h(
         api_key="unit-test",
         instruments=list(close.columns),
@@ -139,6 +159,9 @@ def test_cost_stress_reduces_net_return_and_splits_ignore_future_prices():
         {"confirmation_bars": 0},
         {"entry_buffer_bps": np.nan},
         {"entry_buffer_bps": -1},
+        {"slope_lookback_bars": -1},
+        {"slope_lookback_bars": True},
+        {"slope_lookback_bars": 1.5},
     ],
 )
 def test_invalid_parameters_are_rejected(kwargs):

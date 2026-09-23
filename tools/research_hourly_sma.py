@@ -40,7 +40,7 @@ PERIODS = {
     "train": ("2025-01-01", "2026-01-01"),
     "validation": ("2026-01-01", "2026-05-11"),
     "published_holdout": ("2026-05-11", "2026-07-11"),
-    "later_holdout": ("2026-07-11", "2026-09-22"),
+    "later_holdout": ("2026-07-11", "2026-09-24"),
 }
 
 
@@ -150,9 +150,64 @@ def score(metrics: dict) -> float:
     return metrics["return_pct"] + metrics["max_drawdown_pct"]
 
 
+def run_slope_study(path: Path, output: Path) -> dict:
+    """Isolate the entry filter at fixed SMA(10/30); no retuning or promotion."""
+    close, dropped = load_close(path)
+    cutoff = pd.Timestamp(PERIODS["later_holdout"][1], tz="America/New_York")
+    close = close.loc[close.index < cutoff]
+    variants = {}
+    # One bar is the primary hypothesis. Three/seven bars are sensitivity
+    # checks, not additional chances to select a winner on inspected dates.
+    for lookback in (0, 1, 3, 7):
+        params = HourlyTrendParameters(slope_lookback_bars=lookback)
+        weights = weights_for(close, params)
+        periods = {}
+        for name, bounds in PERIODS.items():
+            periods[name] = {
+                str(cost): evaluate(close, weights, *bounds, cost_bps=cost) for cost in (1, 5, 10)
+            }
+        individual = {}
+        for instrument in UNIVERSE:
+            sleeve = weights.copy()
+            sleeve.loc[:, sleeve.columns != instrument] = 0.0
+            individual[instrument] = {
+                name: evaluate(close, sleeve, *PERIODS[name])
+                for name in ("published_holdout", "later_holdout")
+            }
+        variants[str(lookback)] = {
+            "parameters": asdict(params),
+            "periods": periods,
+            "individual_etfs": individual,
+        }
+    report = {
+        "engine_version": __version__,
+        "input_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "data_end": str(close.index[-1]),
+        "dropped_incomplete_bars": dropped,
+        "status": "exploratory: all periods were previously inspected; no unseen holdout",
+        "hypothesis": "slow SMA rises over one bar before entry; bearish exits unchanged",
+        "assumptions": "SMA 10/30; 25% per ETF; 5% cash buffer; next-bar close; overnight holds",
+        "variants": variants,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    print(report["status"])
+    for lookback, variant in variants.items():
+        print("Slope bars:", lookback)
+        for period, metrics in variant["periods"].items():
+            print(
+                period,
+                "return / drawdown / rebalances:",
+                metrics["1"]["return_pct"],
+                metrics["1"]["max_drawdown_pct"],
+                metrics["1"]["rebalances"],
+            )
+    return report
+
+
 def run_research(path: Path, output: Path) -> dict:
     close, dropped = load_close(path)
-    # September 21 snapshot: later observations never enter this experiment.
+    # September 23 snapshot: later observations never enter this experiment.
     cutoff = pd.Timestamp(PERIODS["later_holdout"][1], tz="America/New_York")
     close = close.loc[close.index < cutoff]
     baseline = HourlyTrendParameters()
@@ -252,13 +307,20 @@ def run_research(path: Path, output: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=Path("data/w09_hourly_ohlcv_20260921.csv"))
+    parser.add_argument("--input", type=Path, default=Path("data/w09_hourly_ohlcv_20260923.csv"))
     parser.add_argument("--download", action="store_true", help="download a fresh hourly CSV first")
-    parser.add_argument("--output", type=Path, default=Path("reports/w09-research/results.json"))
+    parser.add_argument("--slope-study", action="store_true", help="isolate the entry slope filter")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.download:
         download_hourly_data(args.input)
-    run_research(args.input, args.output)
+    output = args.output or Path(
+        "reports/w09-research/slope-results.json"
+        if args.slope_study
+        else "reports/w09-research/results.json"
+    )
+    runner = run_slope_study if args.slope_study else run_research
+    runner(args.input, output)
 
 
 if __name__ == "__main__":
